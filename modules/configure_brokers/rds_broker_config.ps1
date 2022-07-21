@@ -3,7 +3,7 @@
 #install the AD tools powershell
 Install-WindowsFeature RSAT-AD-Powershell
 
-Add-ADGroupMember "${gmsa_group_name}" -members "${vm_name}$"
+Add-ADGroupMember "${broker_group_name}" -members "${vm_name}$"
 Add-LocalGroupMember -Group "Administrators" "${active_directory_netbios_name}\${gmsa_account_name}$"
 
 #copy and install the sql native client from sql server
@@ -18,6 +18,14 @@ c:\temp\sqlncli.msi /quiet
 #Create windows firewall rule allowing SQL 1433 and 1434 
 New-NetFirewallRule -DisplayName "Allow SQL outbound-Default Instance" -Direction Outbound -LocalPort 1433 -Protocol TCP -Action Allow
 New-NetFirewallRule -DisplayName "Allow SQL outbound-Browser Service" -Direction Outbound -LocalPort 1434 -Protocol UDP -Action Allow
+
+#configure Broker HA if this is the first time through
+if (!(Get-RDConnectionBrokerHighAvailability -ConnectionBroker ${first_broker_vm}.${active_directory_domain})) {
+    $databaseConnectionString = "DRIVER=SQL Server Native Client 11.0;SERVER=tcp:${sql_vm_name},1433;DATABASE=RDCB;APP=Remote Desktop Services Connection Broker;Trusted_Connection=Yes;"
+    Set-RDConnectionBrokerHighAvailability -ConnectionBroker ${first_broker_vm}.${active_directory_domain} -databaseConnectionString $databaseConnectionString -ClientAccessName ${broker_record_name}.${active_directory_domain}
+
+}
+
 
 #install the broker role
 import-module remotedesktop

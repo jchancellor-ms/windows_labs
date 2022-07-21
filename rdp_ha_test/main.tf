@@ -2,7 +2,7 @@
 # Create the resource names
 #########################################################################################
 locals {
-  name_string_suffix  = "t6"
+  name_string_suffix  = "t7"
   resource_group_name = "${var.prefix}-rg-${var.region}-${local.name_string_suffix}"
   hub_vnet_name       = "${var.prefix}-vnet-hub-${var.region}-${local.name_string_suffix}"
   spoke_vnet_name     = "${var.prefix}-vnet-spoke-${var.region}-${local.name_string_suffix}"
@@ -368,12 +368,16 @@ module "configure_rds_farm" {
   ]
 }
 
+output "testoutput" {
+  value = module.configure_rds_farm.testoutput
+}
+/*
 #########################################################################################
 # Add and Configure the remaining brokers
 #########################################################################################
 module "configure_brokers" {
   source   = "../modules/configure_brokers"
-  for_each = [for vm in local.rds_farm_vms : vm if substr(vm, 0, 2) == "rb"]
+  for_each = toset([for vm in local.rds_farm_vms : vm if substr(vm, 0, 2) == "rb"])
 
   rg_name                       = azurerm_resource_group.lab_rg.name
   vm_name                       = each.key
@@ -385,11 +389,20 @@ module "configure_brokers" {
   broker_group_name             = local.broker_group_name
   gmsa_account_name             = local.gmsa_account_name
   broker_record_name            = local.broker_record_name
+  first_broker_vm               = [for vm in local.rds_farm_vms : vm if substr(vm, 0, 2) == "rb"][0]
+
+  depends_on = [
+    module.rds_dc,
+    module.on_prem_keyvault_with_access_policy,
+    time_sleep.wait_600_seconds,
+    module.rds_farm_servers,
+    module.configure_rds_farm
+  ]
 }
 
 
 
-/*
+
 #configure the initial broker vm without running a custom script extension
 module "rdp_server_brokers" {
   source = "../modules/lab_guest_server_2019_domain_join"

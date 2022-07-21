@@ -15,10 +15,11 @@ data "template_file" "broker_config" {
     vm_name                       = var.vm_name
     sql_vm_name                   = var.sql_vm_name
     broker_record_name            = var.broker_record_name
-    gmsa_group_name               = var.gmsa_group_name
+    broker_group_name             = var.broker_group_name
     gmsa_account_name             = var.gmsa_account_name
     active_directory_domain       = var.active_directory_domain
     active_directory_netbios_name = var.active_directory_netbios_name
+    first_broker_vm               = var.first_broker_vm
   }
 }
 

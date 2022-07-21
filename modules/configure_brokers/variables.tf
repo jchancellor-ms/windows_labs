@@ -35,7 +35,7 @@ variable "active_directory_netbios_name" {
   description = "The shortname name for the domain being created"
 }
 
-variable "gmsa_group_name" {
+variable "broker_group_name" {
   type        = string
   description = "name for the group where broker servers will be created"
 }
@@ -48,4 +48,9 @@ variable "gmsa_account_name" {
 variable "broker_record_name" {
   type        = string
   description = "name for the a record for broker services"
+}
+
+variable "first_broker_vm" {
+  type        = string
+  description = "name for the first broker vm"
 }

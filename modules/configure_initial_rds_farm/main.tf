@@ -14,7 +14,7 @@ data "template_file" "broker_config" {
     broker_group_name             = var.broker_group_name
     session_group_name            = var.session_group_name
     gmsa_account_name             = var.gmsa_account_name
-    active_directory_domain       = var.active_directory_domain
+    active_directory_domain_fqdn       = var.active_directory_domain
     broker_record_name            = var.broker_record_name
     broker_ip                     = var.broker_ip
     sqladmin_password             = var.sqladmin_password
@@ -39,4 +39,9 @@ resource "azurerm_virtual_machine_extension" "configure_farm" {
         "commandToExecute": "powershell -command \"[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${base64encode(data.template_file.broker_config.rendered)}')) | Out-File -filepath rds_farm_creation.ps1\" && powershell -ExecutionPolicy Unrestricted -File rds_farm_creation.ps1"
     }
 PROTECTED_SETTINGS
+}
+
+
+output "testoutput" {
+    value = data.template_file.broker_config.rendered
 }

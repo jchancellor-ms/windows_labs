@@ -19,8 +19,3 @@ variable "virtual_network_id" {
   description = "Azure resource ID for the load balancer virtual network"
   default     = ""
 }
-
-variable "sql_vm_name" {
-  type        = string
-  description = "The azure resource name for the sql virtual machine"
-}

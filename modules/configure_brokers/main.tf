@@ -9,17 +9,11 @@ data "azurerm_virtual_machine" "this" {
 
 #read in the broker script and populate the variables
 data "template_file" "broker_config" {
-  template = file("${path.module}/rds_broker_config.ps1")
+  template = file("${path.module}/rds_broker_config_simple.ps1")
 
   vars = {
-    vm_name                       = var.vm_name
-    sql_vm_name                   = var.sql_vm_name
-    broker_record_name            = var.broker_record_name
-    broker_group_name             = var.broker_group_name
-    gmsa_account_name             = var.gmsa_account_name
-    active_directory_domain       = var.active_directory_domain
-    active_directory_netbios_name = var.active_directory_netbios_name
-    first_broker_vm               = var.first_broker_vm
+    vm_name     = var.vm_name
+    sql_vm_name = var.sql_vm_name
   }
 }
 
@@ -33,12 +27,12 @@ resource "azurerm_virtual_machine_extension" "configure_broker" {
 
   protected_settings = <<PROTECTED_SETTINGS
     {
-        "commandToExecute": "powershell -command \"[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${base64encode(data.template_file.broker_config.rendered)}')) | Out-File -filepath rds_broker_config.ps1\" && powershell -ExecutionPolicy Unrestricted -File rds_broker_config.ps1"
+        "commandToExecute": "powershell -command \"[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${base64encode(data.template_file.broker_config.rendered)}')) | Out-File -filepath rds_broker_config.ps1\" && powershell -ExecutionPolicy Unrestricted -File rds_broker_config.ps1 exit 0"
     }
 PROTECTED_SETTINGS
 }
 
-#Add to the LB backend pool
+#Add to the LB backend pool after the configuration script completes
 resource "azurerm_lb_backend_address_pool_address" "this_broker" {
   name                    = "${var.vm_name}-broker-ip"
   backend_address_pool_id = var.backend_address_pool_id
@@ -48,4 +42,8 @@ resource "azurerm_lb_backend_address_pool_address" "this_broker" {
   depends_on = [
     azurerm_virtual_machine_extension.configure_broker
   ]
+}
+
+output "testoutput" {
+  value = data.template_file.broker_config.rendered
 }

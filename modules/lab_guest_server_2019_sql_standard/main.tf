@@ -36,6 +36,7 @@ resource "azurerm_windows_virtual_machine" "lab_sql" {
   license_type             = "Windows_Server"
   enable_automatic_updates = true
   patch_mode               = "AutomaticByOS"
+  availability_set_id      = var.availability_set_id
 
   network_interface_ids = [
     azurerm_network_interface.testnic.id,
@@ -135,7 +136,14 @@ resource "azurerm_key_vault_secret" "sqlvmpassword" {
   depends_on   = [var.key_vault_id]
 }
 
-#run the promotion script to make the DC a VM
+#Create a share and copy the sql client msi into it
+data "template_file" "sql_config" {
+  template = file("${path.module}/sql_script.ps1")
+  vars = {
+
+  }
+}
+
 resource "azurerm_virtual_machine_extension" "configure_sql" {
   name                 = "configure_data_disks"
   virtual_machine_id   = azurerm_windows_virtual_machine.lab_sql.id
@@ -156,15 +164,7 @@ PROTECTED_SETTINGS
   ]
 }
 
-
-data "template_file" "sql_config" {
-  template = file("${path.module}/sql_script.ps1")
-  vars = {
-
-  }
-}
-
-
+#Configure the SQL disks and patching
 resource "azurerm_mssql_virtual_machine" "azurerm_sqlvmmanagement" {
 
   virtual_machine_id               = azurerm_windows_virtual_machine.lab_sql.id

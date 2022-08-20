@@ -7,7 +7,7 @@ variable "rg_location" {
   description = "Resource Group region location"
   default     = "westus2"
 }
-variable "vm_name" {
+variable "vm_name_1" {
   type        = string
   description = "The azure resource name for the virtual machine"
 }
@@ -31,7 +31,7 @@ variable "active_directory_netbios_name" {
   type        = string
   description = "The netbios name for the domain being created"
 }
-variable "private_ip_address" {
+variable "private_ip_address_1" {
   type        = string
   description = "The static IP address of the domain controller which will be injected into DNS"
 }
@@ -64,4 +64,8 @@ variable "session_group_name" {
 variable "broker_record_name" {
   type        = string
   description = "name for the a record for broker services"
+}
+variable "availability_set_id" {
+  type        = string
+  description = "the resource id of the availability set where this VM will be deployed"
 }

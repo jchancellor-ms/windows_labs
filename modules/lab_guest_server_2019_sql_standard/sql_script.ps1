@@ -14,8 +14,6 @@ foreach ($disk in $disks) {
 $count++
 }
 
-
-
 #create a share for the sql client msi
 #configure share
 New-Item -Path 'c:\sqlclient' -ItemType Directory

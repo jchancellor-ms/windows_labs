@@ -45,4 +45,14 @@ variable "availability_set_id" {
   description = "the resource id of the availability set where this VM will be deployed"
 }
 
+variable "wildcard_keyvault_id" {
+  type        = string
+  description = "Azure resource  id for the vault containing the wildcard cert for the domain"
+}
+
+variable "wildcard_certificate_name" {
+  type        = string
+  description = "Certificate name for the wildcard certificate"
+}
+
 

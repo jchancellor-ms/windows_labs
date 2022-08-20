@@ -6,8 +6,6 @@ Add-WindowsFeature -name ad-domain-services -IncludeManagementTools
 Install-WindowsFeature -Name DNS -IncludeAllSubFeature -IncludeManagementTools -ErrorAction SilentlyContinue
 #configure a basic domain
 Install-ADDSForest -CreateDnsDelegation:$false -DomainMode WinThreshold -DomainName ${active_directory_domain} -DomainNetbiosName ${active_directory_netbios_name} -ForestMode WinThreshold -InstallDns:$true -SafeModeAdministratorPassword $password -Force:$true
-#create an OU for the hosts if desired in the future
-#New-ADOrganizationalUnit -Name {ou_name} -Path {root_dn}
 
 
 

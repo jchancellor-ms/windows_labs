@@ -54,3 +54,8 @@ variable "session_host_group" {
   type        = string
   description = "The name for the AD group holding session hosts"
 }
+
+variable "availability_set_id" {
+  type        = string
+  description = "the resource id of the availability set where this VM will be deployed"
+}

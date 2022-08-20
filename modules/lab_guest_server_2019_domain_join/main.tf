@@ -1,3 +1,8 @@
+data "azurerm_key_vault_certificate" "wildcard" {
+  name         = var.wildcard_certificate_name
+  key_vault_id = var.wildcard_keyvault_id
+}
+
 
 #create initial login password
 resource "random_password" "userpass" {
@@ -55,6 +60,15 @@ resource "azurerm_windows_virtual_machine" "this" {
     offer     = "WindowsServer"
     sku       = "2019-Datacenter"
     version   = "latest"
+  }
+
+  #Add the wildcard certificate locally on the virtual machine
+  secret {
+    key_vault_id = var.wildcard_keyvault_id
+    certificate {
+      store = "My"
+      url   = data.azurerm_key_vault_certificate.wildcard.secret_id
+    }
   }
 }
 

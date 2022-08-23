@@ -191,7 +191,9 @@ Configuration rdsHAConfig {
             DnsServer            = $ConfigurationData.RDSConfig.DomainFqdn
             Ensure               = 'Present'
             PsDscRunAsCredential = $AdminCredential
-        } 
+        }
+        
+       
 
         # Add the admin domain user as sysadmin in SQL.  This allows us to use the SqlDSC for other SQL logins 
         # TODO: Figure out why the SQL DSC isn't able to use the SQL authentication login. Clean-up the credential objects to only SQL?
@@ -256,7 +258,28 @@ Configuration rdsHAConfig {
             #DependsOn            = '[SqlLogin]RemoveBrokerGroup' 
             PsDscRunAsCredential = $AdminCredential
             GetScript            = { return @{result = 'Starting Broker HA configuration' } }
-            TestScript           = { return $false }
+            TestScript           = { 
+                #return $false 
+                #translate the configuration variables
+                $ThisBrokerHosts         = $Using:ConfigurationData.RDSConfig.BrokerHosts
+                
+                #set the active management server
+                import-module remotedesktop -Verbose:$false | Out-Null
+                $ActiveManagementServer = $ThisBrokerHosts[0] 
+                foreach ($Broker in $ThisBrokerHosts) {
+                    $ThisBroker = $Broker 
+                    if ((Get-RdServer -connectionBroker $ThisBroker -ErrorAction SilentlyContinue).count -gt 0) {
+                        $activeManagementServer = $thisBroker
+                    }
+                }
+
+                if (!((Get-RDConnectionBrokerHighAvailability -ConnectionBroker $activeManagementServer -ErrorAction SilentlyContinue).ConnectionBroker.Count -gt 0)) {
+                    return $false;
+                }
+                else{
+                    return $true
+                }            
+            }
             SetScript            = {
                 
                 #translate the configuration variables
@@ -272,7 +295,7 @@ Configuration rdsHAConfig {
                 $thisSqlClientShare      = $Using:ConfigurationData.RDSConfig.sqlClientShare
                 
                 #set the active management server
-                import-module remotedesktop
+                import-module remotedesktop -Verbose:$false | Out-Null
                 $ActiveManagementServer = $ThisBrokerHosts[0] 
                 foreach ($Broker in $ThisBrokerHosts) {
                     $ThisBroker = $Broker 
@@ -355,7 +378,7 @@ Configuration rdsHAConfig {
             ADManagedServiceAccount 'BrokerGMSA'
             {
                 Ensure                    = 'Present'
-                ServiceAccountName        = $ConfigurationData.RDSConfig.brokerGmsaAccountName
+                ServiceAccountName        = ($ConfigurationData.RDSConfig.brokerGmsaAccountName)
                 AccountType               = 'Group'
                 ManagedPasswordPrincipals = $ConfigurationData.RDSConfig.BrokerGroupName
                 DomainController          = $ConfigurationData.RDSConfig.DomainFqdn
@@ -367,7 +390,7 @@ Configuration rdsHAConfig {
             SqlLogin 'AddBrokerGMSA'
             {
                 Ensure               = 'Present'
-                Name                 = ($ConfigurationData.RDSConfig.DomainName + "\" + $ConfigurationData.RDSConfig.BrokerGmsaAccountName) 
+                Name                 = ($ConfigurationData.RDSConfig.DomainName + "\" + $ConfigurationData.RDSConfig.BrokerGmsaAccountName + "$") 
                 LoginType            = 'WindowsUser'
                 ServerName           = $ConfigurationData.RDSConfig.SqlServer
                 InstanceName         = $ConfigurationData.RDSConfig.SqlServerInstance
@@ -388,12 +411,23 @@ Configuration rdsHAConfig {
             {
                 Ensure               = 'Present'
                 ServerRoleName       = 'Sysadmin'
-                MembersToInclude     = ($ConfigurationData.RDSConfig.DomainName + "\" + $ConfigurationData.RDSConfig.BrokerGmsaAccountName) 
+                MembersToInclude     = ($ConfigurationData.RDSConfig.DomainName + "\" + $ConfigurationData.RDSConfig.BrokerGmsaAccountName + "$")  
                 ServerName           = $ConfigurationData.RDSConfig.SqlServer
                 InstanceName         = $ConfigurationData.RDSConfig.SqlServerInstance
     
                 PsDscRunAsCredential = $AdminCredential
             }   
+
+            DnsRecordA 'DNSBrokerGMSA'
+            {
+                ZoneName             = $ConfigurationData.RDSConfig.DomainFqdn
+                Name                 = $ConfigurationData.RDSConfig.BrokerGmsaAccountName
+                IPv4Address          = $ConfigurationData.RDSConfig.BrokerLbIpAddress
+                TimeToLive           = '01:00:00'
+                DnsServer            = $ConfigurationData.RDSConfig.DomainFqdn
+                Ensure               = 'Present'
+                PsDscRunAsCredential = $AdminCredential
+            } 
 
         }
 
@@ -652,9 +686,14 @@ Configuration rdsHAConfig {
                     }
                 }
                 
-                #getting weird errors on this about RD-Server.  Need to
+                Write-Host "Attempting Certificate Configuration with certificate Thumbprint $thisThumbprint"
+                
                 foreach ($role in $roles) {
-                    if (!(((Get-RDCertificate -ConnectionBroker $ActiveManagementServer -Role $role)[0].Thumbprint.toLower()) -eq $thisThumbprint.toLower())) {
+                    #if the current role returns not configured configure it
+                    if ((Get-RDCertificate -ConnectionBroker $ActiveManagementServer -Role $role).Level -eq "NotConfigured"){
+                        Set-RDCertificate -Role $role -Thumbprint $thisThumbprint -ConnectionBroker $ActiveManagementServer -force
+                    }   #Else check to make sure the certificate is set to the thumbprint value and set it if it does not match.                 
+                    elseif ( ( (Get-RDCertificate -ConnectionBroker $ActiveManagementServer -Role $role)[0].Thumbprint.toLower()) -ne $thisThumbprint.toLower()) {
                         Set-RDCertificate -Role $role -Thumbprint $thisThumbprint -ConnectionBroker $ActiveManagementServer -force
                         Write-Verbose "Installing Certificate for Role $role"
                     }
@@ -682,6 +721,7 @@ Configuration rdsHAConfig {
                     foreach ($FarmGateway in (Get-ChildItem -Path "RDS:\GatewayServer\GatewayFarm\Servers")) {
                         if ($FarmGateway.name.toLower() -eq $ThisGateway.toLower()) {
                             $addFlag = $false
+                            Write-Host "Gateway $ThisGateway already exists in the farm"
                         }
                     }
                     
@@ -691,6 +731,40 @@ Configuration rdsHAConfig {
                         Write-Host "Adding Gateway $ThisGateway to Gateway Farm"
                     }
                 }                 
+            }
+        }
+
+         #Configure Deployment to use the gateway farm
+         script 'SetRDSGatewayConfiguration' {
+            DependsOn            = '[script]AddGatewayToRDSFarm'
+            PsDscRunAsCredential = $AdminCredential
+            GetScript            = { return @{result = 'Configuring the RDS Farm to use the Gateway farm' } }
+            TestScript           = { return $false }
+            SetScript            = {                    
+                #translate the configuration variables
+                $ThisGatewayRecordName  = $Using:ConfigurationData.RDSConfig.GatewayRecordName
+                $ThisDomainFqdn    = $Using:ConfigurationData.RDSConfig.DomainFqdn 
+                $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
+
+                $ThisGatewayFQDN = ($ThisGatewayRecordName + "." + $ThisDomainFQDN)
+                
+                import-module remotedesktop
+                #get the current active management server
+                $ActiveManagementServer = $ThisBrokerHosts[0] 
+                foreach ($Broker in $ThisBrokerHosts) {
+                    $ThisBroker = $Broker 
+                    if ((Get-RdServer -connectionBroker $ThisBroker -ErrorAction SilentlyContinue).count -gt 0) {
+                        $ActiveManagementServer = $thisBroker
+                    }
+                }
+                
+                import-module remotedesktop
+                $GatewayConfig = Get-RDDeploymentGatewayConfiguration -ConnectionBroker $ActiveManagementServer
+                #set a basic gateway configuration
+                if (($GatewayConfig[0].GatewayExternalFQDN.toLower() -ne $ThisGatewayFQDN.toLower()) -or ($GatewayConfig[0].LogonMethod -ne "AllowUserToSelectDuringConnection")){
+                    Write-Host "Setting the Gateway Configuration pointing to gateway $ThisGatewayFQDN"
+                    Set-RDDeploymentGatewayConfiguration -ConnectionBroker $ActiveManagementServer -GatewayExternalFqdn ($ThisGatewayFQDN) -GatewayMode Custom -LogonMethod AllowUserToSelectDuringConnection -UseCachedCredentials $True -BypassLocal $True -Force
+                }               
             }
         }
     }
@@ -951,6 +1025,8 @@ Configuration rdsHAConfig {
                     }
                 }                
                 
+
+
                 #lookup the session host in the session collections
                 foreach ($collection in $thisSessionCollections) {
                     foreach ($sessionHost in $collection.SessionHosts) {
@@ -1107,7 +1183,7 @@ $config_data = @{
         DecryptionKey = "${decryption_key}"
         Decryption    = "AES"
         Validation    = "HMACSHA256"
-        collections                       = @(
+        sessionCollections                       = @(
                                                 [PSCustomObject]@{
                                                     name         = "${collection_name}"
                                                     Description  = "${collection_description}"

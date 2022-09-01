@@ -3,6 +3,10 @@ resource "random_password" "userpass" {
   length           = 20
   special          = true
   override_special = "_-!."
+  min_lower = 2
+  min_numeric = 2
+  min_upper = 2
+  min_special = 2
 }
 
 #store the initial password in a key vault secret

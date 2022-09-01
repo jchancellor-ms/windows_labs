@@ -34,16 +34,86 @@ locals {
   ]
 
   #create string groups for insertion into the DSC template file
+  script_host   = "\"sc-${var.region}-${local.name_string_suffix}-1.${var.domain_fqdn}\""
+
+  broker_list = [for vm in local.rds_farm_vms : format("\"%s.${var.domain_fqdn}\"", vm) if substr(vm, 0, 2) == "rb"]
+  session_list = [for vm in local.rds_farm_vms : format("\"%s.${var.domain_fqdn}\"", vm) if substr(vm, 0, 2) == "rs"]
+  gateway_list = [for vm in local.rds_farm_vms : format("\"%s.${var.domain_fqdn}\"", vm) if substr(vm, 0, 2) == "rg"]
+  web_list = [for vm in local.rds_farm_vms : format("\"%s.${var.domain_fqdn}\"", vm) if substr(vm, 0, 2) == "rw"]
+
+  #format the broker hosts into a string for consumption in the input file 
   broker_hosts  = join(",", [for vm in local.rds_farm_vms : format("\"%s.${var.domain_fqdn}\"", vm) if substr(vm, 0, 2) == "rb"])
   session_hosts = join(",", [for vm in local.rds_farm_vms : format("\"%s.${var.domain_fqdn}\"", vm) if substr(vm, 0, 2) == "rs"])
   gateway_hosts = join(",", [for vm in local.rds_farm_vms : format("\"%s.${var.domain_fqdn}\"", vm) if substr(vm, 0, 2) == "rg"])
   web_hosts     = join(",", [for vm in local.rds_farm_vms : format("\"%s.${var.domain_fqdn}\"", vm) if substr(vm, 0, 2) == "rw"])
-  all_hosts     = join(",", [for vm in local.rds_farm_vms : format("\"%s.${var.domain_fqdn}\"", vm) ])
+  all_hosts     = join(",", [for vm in local.rds_farm_vms : format("\"%s.${var.domain_fqdn}\"", vm)])
 
+  #format the broker hosts into a string with dollar sign ending for proper group creation
   group_broker_hosts  = join(",", [for vm in local.rds_farm_vms : format("\"%s$\"", vm) if substr(vm, 0, 2) == "rb"])
   group_session_hosts = join(",", [for vm in local.rds_farm_vms : format("\"%s$\"", vm) if substr(vm, 0, 2) == "rs"])
   group_gateway_hosts = join(",", [for vm in local.rds_farm_vms : format("\"%s$\"", vm) if substr(vm, 0, 2) == "rg"])
   group_web_hosts     = join(",", [for vm in local.rds_farm_vms : format("\"%s$\"", vm) if substr(vm, 0, 2) == "rw"])
+
+  #build the text block for the server configurations in data part of the powershell script
+  script_config = <<configBlock
+    #Script Host
+        @{
+            NodeName = ${local.script_host}
+            Role = "Script"
+            PSDscAllowDomainUser = $true
+            PSDscAllowPlainTextPassword = $true
+        }
+    configBlock
+
+    broker_config = <<configBlock
+        %{for broker in local.broker_list}
+        @{            
+            NodeName = ${broker}
+            Role = "Broker"
+            PSDscAllowDomainUser = $true
+            PSDscAllowPlainTextPassword = $true
+        },%{endfor}
+    configBlock
+
+    session_config = <<configBlock
+        %{for session in local.session_list}
+        @{            
+            NodeName = ${session}
+            Role = "Session"
+            PSDscAllowDomainUser = $true
+            PSDscAllowPlainTextPassword = $true
+        },%{endfor}
+    configBlock
+
+    gateway_config = <<configBlock
+        %{for gateway in local.gateway_list}
+        @{            
+            NodeName = ${gateway}
+            Role = "Gateway"
+            PSDscAllowDomainUser = $true
+            PSDscAllowPlainTextPassword = $true
+        },%{endfor}
+    configBlock
+
+    web_config = <<configBlock
+        %{for web in local.web_list}
+        @{            
+            NodeName = ${web}
+            Role = "Web"
+            PSDscAllowDomainUser = $true
+            PSDscAllowPlainTextPassword = $true
+        },%{endfor}
+    configBlock
+
+    full_config = <<fullConfig
+    AllNodes =  @(
+        ${local.broker_config}
+        ${local.session_config}
+        ${local.gateway_config}
+        ${local.web_config}
+        ${local.script_config}
+    )
+    fullConfig
 
   gmsa_account_name  = "brokergmsa"
   broker_group_name  = "broker_hosts"
@@ -61,10 +131,6 @@ locals {
 
   ou_name = "sessionhosts"
   ou      = "OU=${local.ou_name},${join(",", [for name in split(".", var.domain_fqdn) : "DC=${name}"])}"
-}
-
-output "test-output" {
-  value = local.broker_hosts
 }
 
 
@@ -539,7 +605,7 @@ module "configure_web" {
 
 module "configure_session_hosts" {
   source   = "../modules/configure_session_hosts"
-  for_each = toset([for vm in local.rds_farm_vms : vm if substr(vm, 0, 2) == "rs"])
+  for_each = toset([for vm in local.rds_farm_vms : vm if((substr(vm, 0, 2) == "rs") || (substr(vm, 0, 2) == "sc"))])
 
   rg_name = azurerm_resource_group.lab_rg.name
   vm_name = each.key
@@ -565,6 +631,7 @@ data "template_file" "farm_config" {
 
   vars = {
 
+    script_host              = local.script_host
     broker_group_name        = local.broker_group_name
     session_group_name       = local.session_group_name
     gateway_group_name       = local.gateway_group_name
@@ -586,8 +653,6 @@ data "template_file" "farm_config" {
     sql_client_share         = local.sql_client_share
     sql_admin                = "sqladmin"
     sql_password             = module.sql_server_1.sqladmin_password
-    enable_gmsa              = var.enable_gmsa
-    broker_gmsa_account_name = local.gmsa_account_name
     admin_user               = "azureuser"
     admin_password           = module.rds_dc.dc_join_password
     thumbprint               = data.azurerm_key_vault_certificate.wildcard.thumbprint
@@ -600,6 +665,8 @@ data "template_file" "farm_config" {
     group_gateway_hosts      = local.group_gateway_hosts
     group_session_hosts      = local.group_session_hosts
     group_web_hosts          = local.group_web_hosts
+    full_config              = local.full_config
+    license_mode             = var.rds_license_mode
   }
 }
 

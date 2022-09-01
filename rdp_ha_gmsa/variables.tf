@@ -9,9 +9,9 @@ variable "spoke_subnets" {}
 variable "digicert_key_vault" {}
 variable "digicert_resource_group_name" {}
 variable "name_string_suffix" {}
-variable "enable_gmsa" {}
 variable "validation_key" {}
 variable "decryption_key" {}
+variable "rds_license_mode" {}
 
 #variable "webaccess_fqdn" {}
 #variable "session_host_fqdns" {}

@@ -1,9 +1,25 @@
+#########################################################################
+# Install the necessary modules on the script host
+#########################################################################
+
+Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+Install-Module -Name ActiveDirectoryDsc -Force -AllowClobber
+Install-Module -Name DnsServerDsc -Force -AllowClobber
+Install-Module -Name SqlServerDsc -Force -AllowClobber
+Install-Module -Name SecurityPolicyDsc -Force -AllowClobber
+Install-Module -Name ComputerManagementDsc -Force -AllowClobber
+Install-Module -Name WebAdministrationDsc -Force -AllowClobber
+Install-Module -Name xRemoteDesktopSessionHost -Force -AllowClobber
+Install-Module -Name SqlServer -Force -AllowClobber
+
 #####################################################################################
 # Generate the credential objects - 
 # !!NOTE: This is for a lab.  If doing this in production, these need to be encyrpted
 #####################################################################################
 [PSCredential]$AdminCredential = New-Object System.Management.Automation.PSCredential(("${domain_name}" + "\" + "${admin_user}"), ( "${admin_password}" | ConvertTo-SecureString -asPlainText -Force ))
 [PSCredential]$credentialObjectSql = New-Object System.Management.Automation.PSCredential( "${sql_admin}", ( "${sql_password}"  | ConvertTo-SecureString -AsPlainText -Force ))
+$GMSAusername = "${domain_name}" + "\" + "${broker_gmsa_account_name}" + "$"
+[PSCredential] $GMSACredential = New-Object System.Management.Automation.PSCredential($GMSAusername, ( "unusedPassword" | ConvertTo-SecureString -AsPlainText -Force ))
 
 #########################################################################
 # Configure the node LCM configuration to allow for reboots
@@ -13,7 +29,8 @@ Configuration lcmConfig {
     param (
         [Parameter(Mandatory = $true)]
         [ValidateNotNullOrEmpty()]
-        [String]$NodeName
+        [String]
+        $NodeName
     )
 
     Node $NodeName
@@ -23,10 +40,10 @@ Configuration lcmConfig {
             RefreshMode = 'Push'
             ActionAfterReboot = "ContinueConfiguration"
             RebootNodeIfNeeded = $true
-            ConfigurationModeFrequencyMins = 15
         }
     }
 }
+
 
 $hosts = @(${all_hosts})
 
@@ -54,7 +71,6 @@ Configuration rdsHAConfig {
     Import-DscResource -ModuleName ComputerManagementDsc
     Import-DscResource -ModuleName WebAdministrationDsc
     Import-DSCResource -Name WindowsFeature
-  
     
     #########################################################################
     # Configure the Script Host and the initial farm and HA configurations
@@ -174,7 +190,8 @@ Configuration rdsHAConfig {
             DnsServer            = $ConfigurationData.RDSConfig.DomainFqdn
             Ensure               = 'Present'
             PsDscRunAsCredential = $AdminCredential
-        }       
+        }
+        
        
 
         # Add the admin domain user as sysadmin in SQL.  This allows us to use the SqlDSC for other SQL logins 
@@ -182,7 +199,7 @@ Configuration rdsHAConfig {
         # Alternately this could be run on the SQL node, but I didn't want to assume that SQL was always being built from scratch
         script 'addAdminUserToSQL' {
             PsDscRunAsCredential = $AdminCredential
-            GetScript            = { return @{result = 'Adding Admin User to SQL sysadmin role for DB creation' } }
+            GetScript            = { return @{result = 'Stopping Broker Services to reset GMSA account' } }
             TestScript           = { return $false }
             SetScript            = {                    
                 #translate the configuration variables
@@ -218,7 +235,7 @@ Configuration rdsHAConfig {
                 $ThisWebHosts = $Using:ConfigurationData.RDSConfig.WebHosts
 
                 #check for the Active Broker
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
+                import-module remotedesktop
                 $ActiveManagementServer = $ThisBrokerHosts[0] 
                 foreach ($Broker in $ThisBrokerHosts) {
                     $ThisBroker = $Broker 
@@ -246,7 +263,7 @@ Configuration rdsHAConfig {
                 $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
                 
                 #set the active management server
-                import-module remotedesktop  -global -Verbose:$false | Out-Null -Verbose:$false | Out-Null
+                import-module remotedesktop -Verbose:$false | Out-Null
                 $ActiveManagementServer = $ThisBrokerHosts[0] 
                 foreach ($Broker in $ThisBrokerHosts) {
                     $ThisBroker = $Broker 
@@ -277,7 +294,7 @@ Configuration rdsHAConfig {
                 $thisSqlClientShare = $Using:ConfigurationData.RDSConfig.sqlClientShare
                 
                 #set the active management server
-                import-module remotedesktop  -global -Verbose:$false | Out-Null -Verbose:$false | Out-Null
+                import-module remotedesktop -Verbose:$false | Out-Null
                 $ActiveManagementServer = $ThisBrokerHosts[0] 
                 foreach ($Broker in $ThisBrokerHosts) {
                     $ThisBroker = $Broker 
@@ -301,38 +318,38 @@ Configuration rdsHAConfig {
                         $svr.ConnectionContext.Password = "$thisSqlPassword" 
                         $svrole = $svr.Roles | where-object { $_.Name -eq 'sysadmin' -or $_.Name -eq 'dbcreator' }
                         $svrole.AddMember("$thisDomainName\$thisBrokerGroupName")  
-                    }                     
+                    } 
 
-                    #Force reboot the brokers - then install the SQL client. Allows for a delay to ensure all the services are back online before trying the HA config
+                    #force reboots on each broker in sequence to ensure they can login to the database using the group membership (this preps the GMSA configuration as well?)
                     foreach ($broker in $thisBrokerHosts) {  
-                        Restart-Computer -ComputerName ($broker) -Wait -For PowerShell -Timeout 300 -Delay 60 -Force
-                        start-sleep -s 60
-                        #check to make sure the service comes back online for the active broker
-                        if (($broker) -eq $thisFirstBroker) {
-                            $thisCounter = 0
-                            while ( ((get-service -name "Remote Desktop Management" -computer ($broker)).status -ne "Running") -and ($thisCounter -lt 10) ) {                                 
-                                get-service -name "Remote Desktop Management" -computer ($broker ) | set-service -status running
-                                start-sleep -s 60
-                                $thisCounter += 1
-                            }
-                        }                         
-                        
                         #re-attempt the sql-client install in case it failed during the terraform build
                         if (!(Get-Item -Path ('\\' + $broker + '\c$\temp'))) {
                             New-Item -Path ('\\' + $broker + '\c$\temp') -ItemType Directory
                         }   
 
-                        #copy the client locally                         
+                        #copy the client locally 
+                        
                         $SourcefilePath = "\\" + $thisSqlServer + "\" + $ThisSqlClientShare + "\sqlncli.msi"
                         $folderPathDest = ('\\' + $broker + '\c$\temp')
                         Write-Host "Copying SQL client from $SourceFilePath to $folderPathDest"
                         Copy-Item -Path $SourcefilePath -Destination $folderPathDest -PassThru
 
-                        #install the SQL native client
-                        invoke-command -Computername ($broker) -ScriptBlock {                             
+
+                        invoke-command -Computername ($broker) -ScriptBlock { 
+                            #install the SQL native client
                             msiexec /i c:\temp\sqlncli.msi /qn IACCEPTSQLNCLILICENSETERMS=YES /log c:\temp\sqlclient_install.log                                              
-                        }             
+                        } 
                         
+                        #Restart-Computer -ComputerName ($broker) -Wait -For PowerShell -Timeout 300 -Delay 30 -Force
+                        #check to make sure the service comes back online for the active broker
+                        if (($broker) -eq $thisFirstBroker) {
+                            $thisCounter = 0
+                            while ( ((get-service -name "Remote Desktop Management" -computer ($broker)).status -ne "Running") -and ($thisCounter -lt 10) ) {                                 
+                                get-service -name "Remote Desktop Management" -computer ($broker ) | set-service -status running
+                                start-sleep -s 30
+                                $thisCounter += 1
+                            }
+                        }
                     }                                   
 
                     #Configure Broker HA                    
@@ -342,55 +359,77 @@ Configuration rdsHAConfig {
             }
         }
 
-        WaitForAny AtLeastOneGatewayHost
-        {
-            ResourceName      = '[script]AddGatewayToRDSFarm'
-            NodeName          = $AllNodes.Where{ $_.Role -contains "Gateway" }.NodeName
-            RetryIntervalSec  = 15
-            RetryCount        = 30
-            PsDscRunAsCredential = $AdminCredential
+        
+        #create the GMSA artifacts if the GSMA toggle is on
+        if ($ConfigurationData.RDSConfig.EnableGmsa) {
+            #Set the KDS rootkey for the GMSA
+            script 'AddKDSRootKey' {
+                PsDscRunAsCredential = $AdminCredential
+                GetScript            = { return @{result = 'Stopping Broker Services to reset GMSA account' } }
+                TestScript           = { return $false }
+                SetScript            = {                    
+                    if (!(get-kdsrootkey)) {
+                        Add-KdsRootKey -EffectiveTime ((get-date).addhours(-10))
+                    }                       
+                }
+            }
+
+            ADManagedServiceAccount 'BrokerGMSA'
+            {
+                Ensure                    = 'Present'
+                ServiceAccountName        = ($ConfigurationData.RDSConfig.brokerGmsaAccountName)
+                AccountType               = 'Group'
+                ManagedPasswordPrincipals = $ConfigurationData.RDSConfig.BrokerGroupName
+                DomainController          = $ConfigurationData.RDSConfig.DomainFqdn
+                PsDscRunAsCredential      = $AdminCredential
+            }
+
+            #TODO: Minimize the number of credentials needed here.   
+    
+            SqlLogin 'AddBrokerGMSA'
+            {
+                Ensure               = 'Present'
+                Name                 = ($ConfigurationData.RDSConfig.DomainName + "\" + $ConfigurationData.RDSConfig.BrokerGmsaAccountName + "$") 
+                LoginType            = 'WindowsUser'
+                ServerName           = $ConfigurationData.RDSConfig.SqlServer
+                InstanceName         = $ConfigurationData.RDSConfig.SqlServerInstance
+                PsDscRunAsCredential = $AdminCredential
+            }
+            <# Add this back in at a later point?
+            SqlLogin 'RemoveBrokerGroup'
+            {
+                Ensure               = 'Absent'
+                Name                 = "$domain_name\$broker_group_name"
+                LoginType            = 'WindowsGroup'
+                ServerName           = $sql_server
+                InstanceName         = $sql_server_instance
+                PsDscRunAsCredential = $AdminCredential
+            }
+            #>
+            SqlRole 'SysadminBrokerGMSA'
+            {
+                Ensure               = 'Present'
+                ServerRoleName       = 'Sysadmin'
+                MembersToInclude     = ($ConfigurationData.RDSConfig.DomainName + "\" + $ConfigurationData.RDSConfig.BrokerGmsaAccountName + "$")  
+                ServerName           = $ConfigurationData.RDSConfig.SqlServer
+                InstanceName         = $ConfigurationData.RDSConfig.SqlServerInstance
+    
+                PsDscRunAsCredential = $AdminCredential
+            }   
+
+            DnsRecordA 'DNSBrokerGMSA'
+            {
+                ZoneName             = $ConfigurationData.RDSConfig.DomainFqdn
+                Name                 = $ConfigurationData.RDSConfig.BrokerGmsaAccountName
+                IPv4Address          = $ConfigurationData.RDSConfig.BrokerLbIpAddress
+                TimeToLive           = '01:00:00'
+                DnsServer            = $ConfigurationData.RDSConfig.DomainFqdn
+                Ensure               = 'Present'
+                PsDscRunAsCredential = $AdminCredential
+            } 
+
         }
 
-                #add certificates - Using script resource since targeting server 2019 and using the thumbprint option
-        #TODO: Check to see why the secondary gateway failed with error missing Module RDManagement while the first did not.  Is this installed as part of the initial deployment?
-        #TODO: Consider moving this to the script host? (Does it need to wait for at least one Gateway to be added)
-        script 'ConfigureCertificates' {
-            DependsOn            = '[WaitForAny]AtLeastOneGatewayHost'
-            PsDscRunAsCredential = $AdminCredential
-            GetScript            = { return @{result = 'Configuring Certificate on the RDS Farm' } }
-            TestScript           = { return $false }
-            SetScript            = {                    
-                
-                #translate the configuration variables
-                $thisThumbprint = $Using:ConfigurationData.RDSConfig.Thumbprint
-                $roles = @("RDRedirector", "RDPublishing","RDGateway", "RDWebAccess")              
-                $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
-                
-                import-module remotedesktop -Global -Verbose:$false | Out-Null
-                #get the current active management server
-                $ActiveManagementServer = $ThisBrokerHosts[0] 
-                foreach ($Broker in $ThisBrokerHosts) {
-                    $ThisBroker = $Broker 
-                    if ((Get-RdServer -connectionBroker $ThisBroker -ErrorAction SilentlyContinue).count -gt 0) {
-                        $ActiveManagementServer = $ThisBroker
-                    }
-                }
-                
-                Write-Host "Attempting Certificate Configuration with certificate Thumbprint $thisThumbprint using management server $activeManagementServer"
-                
-                foreach ($role in $roles) {
-                    #if the current role returns not configured configure it
-                    if ((Get-RDCertificate -ConnectionBroker $ActiveManagementServer -Role $role).Level -eq "NotConfigured") {
-                        Write-Verbose "Installing Certificate for Role $role"
-                        Set-RDCertificate -Role $role -Thumbprint $thisThumbprint -ConnectionBroker $ActiveManagementServer -force
-                    }   #Else check to make sure the certificate is set to the thumbprint value and set it if it does not match.                 
-                    elseif ( ( (Get-RDCertificate -ConnectionBroker $ActiveManagementServer -Role $role)[0].Thumbprint.toLower()) -ne $thisThumbprint.toLower()) {
-                        Write-Verbose "Updating Certificate for Role $role"
-                        Set-RDCertificate -Role $role -Thumbprint $thisThumbprint -ConnectionBroker $ActiveManagementServer -force                        
-                    }
-                }                 
-            }
-        }
     }
 
     #########################################################################
@@ -444,7 +483,7 @@ Configuration rdsHAConfig {
         script 'AddBrokerToFarm' {
             DependsOn            = '[WaitForAll]ScriptHost'
             PsDscRunAsCredential = $AdminCredential
-            GetScript            = { return @{result = 'Adding Broker to existing RDS farm' } }
+            GetScript            = { return @{result = 'Stopping Broker Services to reset GMSA account' } }
             TestScript           = { return $false }
             SetScript            = {                    
                 #translate the configuration variables
@@ -453,7 +492,7 @@ Configuration rdsHAConfig {
                 $ThisSqlServer = $Using:ConfigurationData.RDSConfig.SqlServer
                 $thisSqlClientShare = $Using:ConfigurationData.RDSConfig.sqlClientShare               
 
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
+                import-module remotedesktop
                 #get the current active management server
                 $ActiveManagementServer = $ThisBrokerHosts[0] 
                 foreach ($Broker in $ThisBrokerHosts) {
@@ -483,7 +522,7 @@ Configuration rdsHAConfig {
                     #install the SQL native client
                     msiexec /i c:\temp\sqlncli.msi /qn IACCEPTSQLNCLILICENSETERMS=YES /log c:\temp\sqlclient_install.log  
 
-                    #force a purge on the tickets so the group membership will allow for login to the database 
+                    #force a purge on the tickets so the group membership will allow for login to the database and services can run as the gmsa 
                     klist -li 0x3e7 purge 
 
                     Write-Host "Adding Broker $ThisBroker to existing RD farm management server $ActiveManagementServer"
@@ -492,28 +531,44 @@ Configuration rdsHAConfig {
             }
         }
 
-        script 'ConfigureBrokersAsLicenseServers' {
-            PsDscRunAsCredential = $AdminCredential
-            GetScript            = { return @{result = 'License Server Configuration' } }
-            TestScript           = { return $false }
-            SetScript            = {                    
-                #translate the configuration variables
-                $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
-                $ThisLicenseMode = $Using:ConfigurationData.RDSConfig.LicenseMode
-
-
-                #check for the Active Broker
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
-                $ActiveManagementServer = $ThisBrokerHosts[0] 
-                foreach ($Broker in $ThisBrokerHosts) {
-                    $ThisBroker = $Broker 
-                    if ((Get-RdServer -connectionBroker $ThisBroker -ErrorAction SilentlyContinue).count -gt 0) {
-                        $activeManagementServer = $thisBroker
+        #If GMSA, then enable the GMSA configuration
+        if ($ConfigurationData.RDSConfig.EnableGmsa) {
+            #Set the GMSA account local security policy to mimic Network Service
+            foreach ($UserRight in $ConfigurationData.RDSConfig.BrokerGmsaRights) {
+                UserRightsAssignment $UserRight {
+                    Policy               = $UserRight
+                    Identity             = ($ConfigurationData.RDSConfig.DomainName + "\" + $ConfigurationData.RDSConfig.BrokerGmsaAccountName + "$")
+                    Ensure               = 'Present'
+                    PsDscRunAsCredential = $AdminCredential
+                }
+            }
+            
+            #Stop the broker services if they are running as Network Service
+            script 'StopServices' {
+                PsDscRunAsCredential = $AdminCredential
+                GetScript            = { return @{result = 'Stopping Broker Services to reset GMSA account' } }
+                TestScript           = { return $false }
+                SetScript            = {                    
+                    #translate the configuration variables
+                    $thisServiceList = $Using:ConfigurationData.RDSConfig.brokerServiceList
+                    #Add check to make sure the services also exist
+                    foreach ($service in $thisServiceList) {
+                        if ((Get-WmiObject Win32_Service -Filter "Name='$service'").StartName -eq "NT AUTHORITY\NetworkService") {
+                            Stop-Service -Name $service
+                        }                        
                     }
                 }
+            }
 
-                #Set the license mode.  
-                Set-RDLicenseConfiguration -LicenseServer $ThisBrokerHosts -Mode $ThisLicenseMode -ConnectionBroker $activeManagementServer -force
+            #Update each RDS service to use the gMSA account
+            foreach ($service in $ConfigurationData.RDSConfig.BrokerServiceListFull) {
+                Service $service {
+                    DependsOn            = '[Script]StopServices', '[WindowsFeature]RDS-Connection-Broker'
+                    Name                 = $service
+                    Credential           = $GMSACredential
+                    PsDscRunAsCredential = $AdminCredential
+                    State                = 'Running'
+                }
             }
         }
     }
@@ -570,31 +625,7 @@ Configuration rdsHAConfig {
             DependsOn            = '[WaitForAll]ScriptHost'
             PsDscRunAsCredential = $AdminCredential
             GetScript            = { return @{result = 'Adding this Gateway Server to the RDS Farm' } }
-            TestScript           = { 
-                #return $false
-                #translate the configuration variables
-                $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
-                $thisGateway = $Using:Node.NodeName
-                    
-                #set the active management server
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
-                $ActiveManagementServer = $ThisBrokerHosts[0] 
-                foreach ($Broker in $ThisBrokerHosts) {
-                    $ThisBroker = $Broker 
-                    if ((Get-RdServer -connectionBroker $ThisBroker -ErrorAction SilentlyContinue).count -gt 0) {
-                        $activeManagementServer = $thisBroker
-                    }
-                }
-                $addGatewayFlag = $false
-                foreach ($configuredGateway in (Get-RDserver -Role "RDS-Gateway" -ConnectionBroker $ActiveManagementServer -ErrorAction SilentlyContinue)) {
-                    if ( $configuredGateway.Server.ToLower() -eq ($thisGateway).ToLower()) {
-                        $addGatewayFlag = $true
-                    }
-                } 
-
-                return $addGatewayFlag   
-            
-            }
+            TestScript           = { return $false }
             SetScript            = {                    
                 #translate the configuration variables
                 $thisGateway = $Using:Node.NodeName
@@ -602,9 +633,9 @@ Configuration rdsHAConfig {
                 $ThisDomainFqdn = $Using:ConfigurationData.RDSConfig.DomainFqdn 
                 $thisGatewayRecord = $Using:ConfigurationData.RDSConfig.GatewayRecordName
 
-                #$thisGateway = $thisGateway + "." + $thisDomainFQDN
+                $thisGateway = $thisGateway + "." + $thisDomainFQDN
                 
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
+                import-module remotedesktop
                 #get the current active management server
                 $ActiveManagementServer = $ThisBrokerHosts[0] 
                 foreach ($Broker in $ThisBrokerHosts) {
@@ -612,12 +643,60 @@ Configuration rdsHAConfig {
                     if ((Get-RdServer -connectionBroker $ThisBroker -ErrorAction SilentlyContinue).count -gt 0) {
                         $ActiveManagementServer = $thisBroker
                     }
-                }               
-            
-                Write-Host "Adding $thisGateway as a Gateway to existing RD farm using management server $ActiveManagementServer"
-                Add-RDServer -Server ($thisGateway ) -Role "RDS-Gateway" -ConnectionBroker $ActiveManagementServer -GatewayExternalFqdn ($thisGatewayRecord + "." + $thisDomainFQDN)
+                }
                 
+                $addGatewayFlag = $true
+                foreach ($configuredGateway in (Get-RDserver -Role "RDS-Gateway" -ConnectionBroker $ActiveManagementServer)) {
+                    if ( $configuredGateway.Server.ToLower() -eq ($thisGateway).ToLower()) {
+                        $addGatewayFlag = $false
+                    }
+                }                                      
+                
+                if ($addGatewayFlag) {
+                    Write-Host "Adding $thisGateway as a Gateway to existing RD farm using management server $ActiveManagementServer"
+                    Add-RDServer -Server ($thisGateway ) -Role "RDS-Gateway" -ConnectionBroker $ActiveManagementServer -GatewayExternalFqdn ($thisGatewayRecord + "." + $thisDomainFQDN)
+                }  
                 Write-Verbose "Gateway Add Complete for $thisGateway"                      
+            }
+        }
+
+        #add certificates - Using script resource since targeting server 2019 and using the thumbprint option
+        #TODO: Check to see why the secondary gateway failed with error missing Module RDManagement while the first did not.  Is this installed as part of the initial deployment?
+        #TODO: Consider moving this to the script host? (Does it need to wait for at least one Gateway to be added)
+        script 'ConfigureCertificates' {
+            DependsOn            = '[script]AddGatewayToRDSFarm'
+            PsDscRunAsCredential = $AdminCredential
+            GetScript            = { return @{result = 'Configuring Certificate on the RDS Farm' } }
+            TestScript           = { return $false }
+            SetScript            = {                    
+                
+                #translate the configuration variables
+                $thisThumbprint = $Using:ConfigurationData.RDSConfig.Thumbprint
+                $roles = @("RDRedirector", "RDPublishing", "RDWebAccess", "RDGateway")               
+                $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
+                
+                import-module remotedesktop
+                #get the current active management server
+                $ActiveManagementServer = $ThisBrokerHosts[0] 
+                foreach ($Broker in $ThisBrokerHosts) {
+                    $ThisBroker = $Broker 
+                    if ((Get-RdServer -connectionBroker $ThisBroker -ErrorAction SilentlyContinue).count -gt 0) {
+                        $ActiveManagementServer = $thisBroker
+                    }
+                }
+                
+                Write-Host "Attempting Certificate Configuration with certificate Thumbprint $thisThumbprint"
+                
+                foreach ($role in $roles) {
+                    #if the current role returns not configured configure it
+                    if ((Get-RDCertificate -ConnectionBroker $ActiveManagementServer -Role $role).Level -eq "NotConfigured") {
+                        Set-RDCertificate -Role $role -Thumbprint $thisThumbprint -ConnectionBroker $ActiveManagementServer -force
+                    }   #Else check to make sure the certificate is set to the thumbprint value and set it if it does not match.                 
+                    elseif ( ( (Get-RDCertificate -ConnectionBroker $ActiveManagementServer -Role $role)[0].Thumbprint.toLower()) -ne $thisThumbprint.toLower()) {
+                        Set-RDCertificate -Role $role -Thumbprint $thisThumbprint -ConnectionBroker $ActiveManagementServer -force
+                        Write-Verbose "Installing Certificate for Role $role"
+                    }
+                }                 
             }
         }
 
@@ -631,8 +710,8 @@ Configuration rdsHAConfig {
                 #translate the configuration variables
                 $ThisGatewayHosts = $Using:ConfigurationData.RDSConfig.gatewayHosts
                 
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
-                import-module RemoteDesktopServices -Verbose:$false | Out-Null
+                import-module remotedesktop
+                import-module RemoteDesktopServices
                 foreach ($ThisGateway in $ThisGatewayHosts) {
                     
 
@@ -668,7 +747,7 @@ Configuration rdsHAConfig {
 
                 $ThisGatewayFQDN = ($ThisGatewayRecordName + "." + $ThisDomainFQDN)
                 
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
+                import-module remotedesktop
                 #get the current active management server
                 $ActiveManagementServer = $ThisBrokerHosts[0] 
                 foreach ($Broker in $ThisBrokerHosts) {
@@ -678,7 +757,7 @@ Configuration rdsHAConfig {
                     }
                 }
                 
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
+                import-module remotedesktop
                 $GatewayConfig = Get-RDDeploymentGatewayConfiguration -ConnectionBroker $ActiveManagementServer
                 #set a basic gateway configuration
                 if ($GatewayConfig[0].GatewayMode -eq "DoNotUse") {
@@ -739,35 +818,16 @@ Configuration rdsHAConfig {
             DependsOn            = '[WaitForAll]ScriptHost'
             PsDscRunAsCredential = $AdminCredential
             GetScript            = { return @{result = 'Adding this Web Server to the RDS Farm' } }
-            TestScript           = {
-                #translate the configuration variables
-                $ThisWeb = $Using:Node.NodeName
-                $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
-                
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
-                #get the current active management server
-                $ActiveManagementServer = $ThisBrokerHosts[0] 
-                foreach ($Broker in $ThisBrokerHosts) {
-                    $ThisBroker = $Broker 
-                    if ((Get-RdServer -connectionBroker $ThisBroker -ErrorAction SilentlyContinue).count -gt 0) {
-                        $ActiveManagementServer = $thisBroker
-                    }
-                }
- 
-                 $WebExistsFlag = $false
-                 foreach ($configuredWeb in (Get-RDserver -Role "RDS-Web-Access" -ConnectionBroker $ActiveManagementServer -ErrorAction SilentlyContinue)) {
-                     if ( $configuredWeb.Server.ToLower() -eq ($ThisWeb ).ToLower()) {
-                        $WebExistsFlag = $true
-                     }
-                 }  
-                
-                return $WebExistsFlag }
+            TestScript           = { return $false }
             SetScript            = {                    
                 #translate the configuration variables
                 $ThisWeb = $Using:Node.NodeName
                 $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
+                $ThisDomainFqdn = $Using:ConfigurationData.RDSConfig.DomainFqdn
+
+                $thisWeb = $thisWeb + "." + $thisDomainFQDN
                 
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
+                import-module remotedesktop
                 #get the current active management server
                 $ActiveManagementServer = $ThisBrokerHosts[0] 
                 foreach ($Broker in $ThisBrokerHosts) {
@@ -777,9 +837,17 @@ Configuration rdsHAConfig {
                     }
                 }
 
-                Write-Host "Adding Web host $ThisWeb to existing RD farm"
-                Add-RDServer -Server $ThisWeb  -Role "RDS-Web-Access" -ConnectionBroker $ActiveManagementServer 
-    
+                $addWebFlag = $true
+                foreach ($configuredWeb in (Get-RDserver -Role "RDS-Web-Access" -ConnectionBroker $ActiveManagementServer)) {
+                    if ( $configuredWeb.Server.ToLower() -eq ($ThisWeb ).ToLower()) {
+                        $addWebFlag = $false
+                    }
+                }                                      
+                
+                if ($addWebFlag) {
+                    Write-Host "Adding Web host $ThisWeb to existing RD farm"
+                    Add-RDServer -Server ($ThisWeb ) -Role "RDS-Web-Access" -ConnectionBroker $ActiveManagementServer 
+                }  
                 Write-Verbose "Web Add Complete for $ThisWeb"                      
             }
         }
@@ -821,6 +889,29 @@ Configuration rdsHAConfig {
                         Write-Verbose "Updating the validationKey value on site $site for $thisWeb"
                     }
                 }                        
+            }
+        }
+
+        if ($ConfigurationData.RDSConfig.EnableGmsa) {
+            #If GMSA, update the application configuration to point to the GMSA hostname instead of the brokers (This is to address Kerberos SPN mismatches if using GMSA)
+            script 'AddGMSAToWeb' {
+                DependsOn            = '[Script]AddWebToFarm'
+                PsDscRunAsCredential = $AdminCredential
+                GetScript            = { return @{result = 'Checking RDWeb App Settings' } }
+                TestScript           = { return $false }
+                SetScript            = {                    
+                    #translate the configuration variables
+                    $thisGMSARecordName = $Using:ConfigurationData.RDSConfig.BrokerGmsaAccountName
+                    $thisWeb = $Using:Node.NodeName
+                    $ThisDomainFqdn = $Using:ConfigurationData.RDSConfig.DomainFqdn
+
+                    $brokerFQDN = ($thisGMSARecordName + "." + $thisDomainFQDN)
+
+                    if (!((Get-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/Default Web Site/RDWeb'  -filter "appSettings/add[@key='radcmserver']" -name "value").Value -eq $brokerFQDN)) {
+                        Set-WebConfigurationProperty -pspath 'MACHINE/WEBROOT/APPHOST/Default Web Site/RDWeb'  -filter "appSettings/add[@key='radcmserver']" -name "value" -value $brokerFQDN
+                        Write-Verbose "Updating the RDWeb App Settings to point to GMSA host for $thisWeb"
+                    }
+                }
             }
         }
     }
@@ -870,12 +961,17 @@ Configuration rdsHAConfig {
             DependsOn            = '[WaitForAll]ScriptHost'
             PsDscRunAsCredential = $AdminCredential
             GetScript            = { return @{result = 'Adding this Session Server to the RDS Farm' } }
-            TestScript           = { 
+            TestScript           = { return $false }
+            SetScript            = {                    
+               
                 #translate the configuration variables
                 $ThisSession = $Using:Node.NodeName
                 $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
-                
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
+                $ThisDomainFqdn = $Using:ConfigurationData.RDSConfig.DomainFqdn
+
+                $thisSession = $thisSession + "." + $thisDomainFQDN
+
+                import-module remotedesktop
                 #get the current active management server
                 $ActiveManagementServer = $ThisBrokerHosts[0] 
                 foreach ($Broker in $ThisBrokerHosts) {
@@ -886,35 +982,21 @@ Configuration rdsHAConfig {
                 }
 
                 #Check to see if session host has already been added
-                $SessionFlagExists = $false
-                foreach ($configuredSession in (Get-RDserver -Role "RDS-RD-Server" -ConnectionBroker $ActiveManagementServer -ErrorAction SilentlyContinue )) {
+                $addSessionFlag = $true
+                foreach ($configuredSession in (Get-RDserver -Role "RDS-RD-Server" -ConnectionBroker $ActiveManagementServer)) {
                     if ( $configuredSession.Server.ToLower() -eq ($thisSession ).ToLower()) {
-                        $SessionFlagExists = $true
+                        $addSessionFlag = $false
                     }
-                }   
+                }                                      
                 
-                return $SessionFlagExists }
-            SetScript            = {                    
-               
-                #translate the configuration variables
-                $ThisSession = $Using:Node.NodeName
-                $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
-
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
-                #get the current active management server
-                $ActiveManagementServer = $ThisBrokerHosts[0] 
-                foreach ($Broker in $ThisBrokerHosts) {
-                    $ThisBroker = $Broker 
-                    if ((Get-RdServer -connectionBroker $ThisBroker -ErrorAction SilentlyContinue).count -gt 0) {
-                        $ActiveManagementServer = $thisBroker
-                    }
-                }                                   
-                
-
-                Write-Host "Adding Session Host to existing RD farm"
-                Add-RDServer -Server ($thisSession ) -Role "RDS-RD-Server" -ConnectionBroker $ActiveManagementServer
-                Write-Host "Session Host Add Complete for $thisSession"                
-                                 
+                if ($addSessionFlag) {
+                    Write-Host "Adding Session Host to existing RD farm"
+                    Add-RDServer -Server ($thisSession ) -Role "RDS-RD-Server" -ConnectionBroker $ActiveManagementServer
+                    Write-Host "Session Host Add Complete for $thisSession"
+                }
+                else {
+                    Write-Host "Session Host $thisSession already exists in Farm"
+                }                                      
             }
         }
 
@@ -932,8 +1014,11 @@ Configuration rdsHAConfig {
                 $ThisSessionHost = $Using:Node.NodeName
                 $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
                 $thisSessionCollections = $Using:ConfigurationData.RDSConfig.sessionCollections
-                                
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
+                $ThisDomainFqdn = $Using:ConfigurationData.RDSConfig.DomainFqdn
+
+                $ThisSessionHost = $ThisSessionHost + "." + $thisDomainFQDN
+
+                import-module remotedesktop
                 #get the current active management server
                 $ActiveManagementServer = $ThisBrokerHosts[0] 
                 foreach ($Broker in $ThisBrokerHosts) {
@@ -941,7 +1026,9 @@ Configuration rdsHAConfig {
                     if ((Get-RdServer -connectionBroker $ThisBroker -ErrorAction SilentlyContinue).count -gt 0) {
                         $ActiveManagementServer = $thisBroker
                     }
-                }   
+                }                
+                
+
 
                 #lookup the session host in the session collections
                 foreach ($collection in $thisSessionCollections) {
@@ -972,7 +1059,7 @@ Configuration rdsHAConfig {
                 $ThisBrokerHosts = $Using:ConfigurationData.RDSConfig.BrokerHosts
                 $thisSessionCollections = $Using:ConfigurationData.RDSConfig.sessionCollections
 
-                import-module remotedesktop  -global -Verbose:$false | Out-Null
+                import-module remotedesktop
                 #get the current active management server
                 $ActiveManagementServer = $ThisBrokerHosts[0] 
                 foreach ($Broker in $ThisBrokerHosts) {
@@ -1015,7 +1102,42 @@ $config_data = @{
     #############################
     # Inject variables for all nodes
     #############################
-    ${full_config}
+    AllNodes  = @(
+        #Script Node
+        @{
+            NodeName = 'sc-westus2-ac-1'
+            Role     = "Script"
+        },
+
+        # BrokerNodes
+        @{
+            NodeName = @(${broker_hosts})
+            Role     = "Broker"
+            #define the GMSA details
+            
+        },
+
+        # GatewayNodes
+        @{
+            NodeName = @(${gateway_hosts})
+            Role     = "Gateway"
+            
+        },
+
+        # WebNodes
+        @{
+            NodeName = @(${web_hosts})
+            Role     = "Web"
+            
+        },
+
+        # SessionNodes
+        @{
+            NodeName = @(${session_hosts})
+            Role     = "Session"
+            
+        }
+    )
 
     RDSConfig = @{
         #define role group names
@@ -1048,11 +1170,15 @@ $config_data = @{
         SqlServer             = "${sql_server}"
         SqlServerInstance     = "${sql_server_instance}"
         SqlClientShare        = "sqlclient" 
-        #Set the license mode
-        LicenseMode           = "${license_mode}"
+        #define the GMSA details
+        EnableGmsa            = ${enable_gmsa}  
+        brokerGmsaAccountName = "${broker_gmsa_account_name}"
+        brokerGmsaRights      = @("Adjust_memory_quotas_for_a_process", "Generate_security_audits", "Log_on_as_a_service", "Replace_a_process_level_token", "Impersonate_a_client_after_authentication", "Bypass_traverse_checking", "Create_global_objects" )
+        brokerServiceList     = @('Tssdis', 'RDMS', 'TScPubRPC')
+        brokerServiceListFull = @('Remote Desktop Management', 'Remote Desktop Connection Broker', 'RemoteApp and Desktop Connection Management')
 
-        #define the secrets - TODO: move this to a more secure implementation
         AdminUser             = "${admin_user}"
+        AdminPassword         = "${admin_password}"
         sqladmin              = "${sql_admin}"
         sqlPassword           = "${sql_password}" 
         Thumbprint            = "${thumbprint}"
@@ -1071,7 +1197,3 @@ $config_data = @{
 } 
 
 rdsHAConfig -ConfigurationData $config_data
-
-
-#to run, . source the file . ./filename
-#apply using  Start-dscConfiguration -Path ./rdsHAConfig -Force
